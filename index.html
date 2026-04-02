@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Sonic Runner</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; touch-action: none; }
+canvas { display: block; width: 100%; height: 100%; }
+#ui { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; justify-content: space-between; pointer-events: none; font-family: 'Arial Black', sans-serif; }
+#score { color: #FFD700; font-size: 24px; text-shadow: 2px 2px 0 #000; }
+#rings { color: #FFD700; font-size: 24px; text-shadow: 2px 2px 0 #000; }
+#startScreen { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: linear-gradient(180deg, #1a1a6e 0%, #000 100%); z-index: 10; }
+#startScreen h1 { font-family: 'Arial Black', sans-serif; font-size: 48px; color: #4FC3F7; text-shadow: 3px 3px 0 #0D47A1; margin-bottom: 10px; letter-spacing: 4px; }
+#startScreen h2 { font-family: Arial, sans-serif; font-size: 18px; color: #90CAF9; margin-bottom: 40px; }
+#startScreen .tap { font-family: Arial, sans-serif; font-size: 20px; color: #fff; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+#gameOver { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; background: rgba(0,0,0,0.8); z-index: 10; }
+#gameOver h1 { font-family: 'Arial Black', sans-serif; font-size: 40px; color: #FF5252; margin-bottom: 20px; }
+#gameOver .score { font-family: Arial, sans-serif; font-size: 24px; color: #FFD700; margin-bottom: 10px; }
+#gameOver .tap { font-family: Arial, sans-serif; font-size: 18px; color: #fff; animation: pulse 1.5s infinite; margin-top: 20px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="score">SCORE: 0</div>
+  <div id="rings">💍 0</div>
+</div>
+<div id="startScreen">
+  <h1>SONIC RUN</h1>
+  <h2>⬡ Collect Rings ⬡ Avoid Enemies ⬡</h2>
+  <div class="tap">TAP TO START</div>
+</div>
+<div id="gameOver">
+  <h1>GAME OVER</h1>
+  <div class="score" id="finalScore">Score: 0</div>
+  <div class="score" id="finalRings">Rings: 0</div>
+  <div class="tap">TAP TO RETRY</div>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = window.innerWidth * devicePixelRatio;
+  canvas.height = window.innerHeight * devicePixelRatio;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Game state
+let state = 'start'; // start, playing, dead
+let score = 0, rings = 0, speed = 6, distance = 0;
+let groundY, scaleX, scaleY;
+
+// Player (Sonic-like)
+const sonic = {
+  x: 0, y: 0, w: 0, h: 0,
+  vy: 0, jumping: false, ducking: false,
+  frame: 0, frameTimer: 0,
+  spinTimer: 0, // spin dash animation
+  hitTimer: 0,
+};
+
+let platforms = [];
+let rings_list = [];
+let enemies = [];
+let particles = [];
+let bgStars = [];
+let clouds = [];
+let trees = [];
+
+// Generate background
+function initBG() {
+  bgStars = [];
+  clouds = [];
+  trees = [];
+  for (let i = 0; i < 50; i++) bgStars.push({ x: Math.random() * canvas.width, y: Math.random() * canvas.height * 0.6, s: Math.random() * 2 + 1, twinkle: Math.random() * Math.PI * 2 });
+  for (let i = 0; i < 6; i++) clouds.push({ x: Math.random() * canvas.width, y: Math.random() * canvas.height * 0.3 + 20, w: Math.random() * 80 + 60, speed: Math.random() * 0.5 + 0.2 });
+  for (let i = 0; i < 8; i++) trees.push({ x: Math.random() * canvas.width, type: Math.floor(Math.random() * 3) });
+}
+
+function reset() {
+  score = 0; rings = 0; speed = 6; distance = 0;
+  groundY = canvas.height * 0.75;
+  scaleX = canvas.width / 400;
+  scaleY = canvas.height / 700;
+  sonic.x = canvas.width * 0.15;
+  sonic.y = groundY - 50 * scaleY;
+  sonic.w = 36 * scaleX;
+  sonic.h = 50 * scaleY;
+  sonic.vy = 0;
+  sonic.jumping = false;
+  sonic.ducking = false;
+  sonic.frame = 0;
+  sonic.spinTimer = 0;
+  sonic.hitTimer = 0;
+  platforms = [];
+  rings_list = [];
+  enemies = [];
+  particles = [];
+  initBG();
+  // Initial ground platforms
+  for (let i = 0; i < 8; i++) {
+    platforms.push({ x: i * (canvas.width / 4), w: canvas.width / 3 + 100, type: 'ground' });
+  }
+}
+
+// Spawn helpers
+function spawnRing() {
+  const y = groundY - (Math.random() > 0.7 ? 120 * scaleY : 60 * scaleY);
+  rings_list.push({ x: canvas.width + 20, y, collected: false, anim: 0 });
+}
+
+function spawnEnemy() {
+  const types = ['motobug', 'crabmeat', 'buzzbomber'];
+  const type = types[Math.floor(Math.random() * types.length)];
+  let y = groundY - 40 * scaleY;
+  if (type === 'buzzbomber') y = groundY - 110 * scaleY;
+  enemies.push({ x: canvas.width + 20, y, type, frame: 0, alive: true });
+}
+
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({ x, y, vx: (Math.random() - 0.5) * 8, vy: -Math.random() * 6 - 2, life: 1, color, size: Math.random() * 4 + 2 });
+  }
+}
+
+// Drawing functions
+function drawSonic() {
+  const { x, y, w, h, frame, spinTimer, hitTimer } = sonic;
+  ctx.save();
+  ctx.translate(x + w/2, y + h/2);
+
+  // Hit flash
+  if (hitTimer > 0 && Math.floor(hitTimer * 10) % 2 === 0) { ctx.globalAlpha = 0.5; }
+
+  if (spinTimer > 0) {
+    // Spin dash - spinning ball
+    ctx.rotate(Date.now() / 50);
+    ctx.beginPath();
+    ctx.arc(0, 0, w * 0.4, 0, Math.PI * 2);
+    ctx.fillStyle = '#2196F3';
+    ctx.fill();
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    // Spikes on ball
+    for (let i = 0; i < 4; i++) {
+      ctx.save();
+      ctx.rotate(i * Math.PI / 2);
+      ctx.beginPath();
+      ctx.moveTo(w * 0.35, 0);
+      ctx.lineTo(w * 0.55, -6);
+      ctx.lineTo(w * 0.55, 6);
+      ctx.fillStyle = '#1565C0';
+      ctx.fill();
+      ctx.restore();
+    }
+  } else {
+    // Normal Sonic body
+    const bounce = sonic.jumping ? 0 : Math.sin(Date.now() / 100) * 2;
+    ctx.translate(0, bounce);
+
+    // Body
+    ctx.beginPath();
+    ctx.ellipse(0, 4, w * 0.35, h * 0.35, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#2196F3';
+    ctx.fill();
+
+    // Head
+    ctx.beginPath();
+    ctx.arc(0, -h * 0.18, w * 0.32, 0, Math.PI * 2);
+    ctx.fillStyle = '#1E88E5';
+    ctx.fill();
+
+    // Belly
+    ctx.beginPath();
+    ctx.ellipse(0, 8, w * 0.22, h * 0.18, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#BBDEFB';
+    ctx.fill();
+
+    // Spikes
+    const spikeAngles = [-2.2, -1.6, -1.0];
+    spikeAngles.forEach(a => {
+      ctx.save();
+      ctx.rotate(a);
+      ctx.beginPath();
+      ctx.moveTo(w * 0.25, -5);
+      ctx.lineTo(w * 0.55, 0);
+      ctx.lineTo(w * 0.2, 8);
+      ctx.fillStyle = '#1565C0';
+      ctx.fill();
+      ctx.restore();
+    });
+
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.ellipse(-6, -h * 0.22, 7, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(8, -h * 0.22, 7, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Pupils
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(-3, -h * 0.21, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(11, -h * 0.21, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Nose
+    ctx.beginPath();
+    ctx.ellipse(14, -h * 0.13, 4, 3, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#1565C0';
+    ctx.fill();
+
+    // Running legs animation
+    if (!sonic.jumping) {
+      const legAnim = Math.sin(Date.now() / 60) * 8;
+      ctx.fillStyle = '#FF5722';
+      ctx.beginPath();
+      ctx.ellipse(-8, h * 0.32 + legAnim, 7, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(8, h * 0.32 - legAnim, 7, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Jumping pose - legs tucked
+      ctx.fillStyle = '#FF5722';
+      ctx.beginPath();
+      ctx.ellipse(-10, h * 0.28, 7, 5, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(10, h * 0.28, 7, 5, 0.3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function drawRing(x, y, collected, anim) {
+  if (collected) return;
+  const s = 12 * scaleX;
+  const shimmer = Math.sin(Date.now() / 200 + anim) * 0.15;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(1 + shimmer, 1 + shimmer);
+
+  // Outer
+  ctx.beginPath();
+  ctx.arc(0, 0, s, 0, Math.PI * 2);
+  ctx.fillStyle = '#FFD700';
+  ctx.fill();
+  ctx.strokeStyle = '#FFA000';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Inner hole
+  ctx.beginPath();
+  ctx.arc(0, 0, s * 0.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#FFF8E1';
+  ctx.fill();
+
+  // Shine
+  ctx.beginPath();
+  ctx.arc(-s * 0.25, -s * 0.25, s * 0.2, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawEnemy(e) {
+  ctx.save();
+  ctx.translate(e.x, e.y);
+
+  if (e.type === 'motobug') {
+    // Red motor bug
+    ctx.fillStyle = '#D32F2F';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 22 * scaleX, 14 * scaleY, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Eye
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(12 * scaleX, -4 * scaleY, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(14 * scaleX, -4 * scaleY, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    // Wheel
+    ctx.fillStyle = '#333';
+    ctx.beginPath();
+    ctx.arc(-10 * scaleX, 10 * scaleY, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(10 * scaleX, 10 * scaleY, 6, 0, Math.PI * 2);
+    ctx.fill();
+    // Fire exhaust
+    ctx.fillStyle = '#FF9800';
+    ctx.beginPath();
+    ctx.moveTo(-22 * scaleX, -2);
+    ctx.lineTo(-32 * scaleX, 0);
+    ctx.lineTo(-22 * scaleX, 4);
+    ctx.fill();
+  } else if (e.type === 'crabmeat') {
+    // Crab
+    ctx.fillStyle = '#E53935';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 20 * scaleX, 12 * scaleY, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Claws
+    ctx.fillStyle = '#C62828';
+    const clawAnim = Math.sin(Date.now() / 300) * 4;
+    ctx.beginPath();
+    ctx.ellipse(-22 * scaleX, -2 + clawAnim, 8, 5, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(22 * scaleX, -2 - clawAnim, 8, 5, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(-6 * scaleX, -6 * scaleY, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(6 * scaleX, -6 * scaleY, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(-5 * scaleX, -6 * scaleY, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(7 * scaleX, -6 * scaleY, 2, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Buzz bomber (bee)
+    const wingFlap = Math.sin(Date.now() / 80) * 6;
+    ctx.fillStyle = '#FDD835';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 10 * scaleX, 16 * scaleY, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Wings
+    ctx.fillStyle = 'rgba(200,230,255,0.7)';
+    ctx.beginPath();
+    ctx.ellipse(-14 * scaleX, -6 + wingFlap, 12, 6, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(14 * scaleX, -6 - wingFlap, 12, 6, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+    // Stripes
+    ctx.fillStyle = '#333';
+    ctx.fillRect(-12 * scaleX, -2, 24 * scaleX, 3);
+    ctx.fillRect(-10 * scaleX, 6, 20 * scaleX, 3);
+    // Eye
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(0, -8 * scaleY, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(1, -8 * scaleY, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawBackground() {
+  // Sky gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  grad.addColorStop(0, '#0D47A1');
+  grad.addColorStop(0.4, '#1565C0');
+  grad.addColorStop(0.7, '#1E88E5');
+  grad.addColorStop(1, '#4FC3F7');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Stars
+  bgStars.forEach(s => {
+    s.twinkle += 0.02;
+    ctx.globalAlpha = 0.3 + Math.sin(s.twinkle) * 0.3;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.s, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+
+  // Clouds
+  clouds.forEach(c => {
+    c.x -= c.speed * (speed / 6);
+    if (c.x + c.w < 0) c.x = canvas.width + c.w;
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, c.w, 20 * scaleY, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(c.x - c.w * 0.3, c.y + 5, c.w * 0.6, 14 * scaleY, 0, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Green hills background
+  ctx.fillStyle = '#1B5E20';
+  ctx.beginPath();
+  ctx.moveTo(0, groundY);
+  for (let x = 0; x <= canvas.width; x += 40) {
+    const hillY = groundY - 30 * scaleY - Math.sin((x + distance * 0.3) / 100) * 25 * scaleY;
+    ctx.lineTo(x, hillY);
+  }
+  ctx.lineTo(canvas.width, groundY);
+  ctx.fill();
+
+  // Ground
+  ctx.fillStyle = '#2E7D32';
+  ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+
+  // Ground stripe
+  ctx.fillStyle = '#1B5E20';
+  ctx.fillRect(0, groundY, canvas.width, 4);
+
+  // Ground details (grass tufts)
+  ctx.strokeStyle = '#4CAF50';
+  ctx.lineWidth = 2;
+  for (let x = 0; x < canvas.width; x += 30) {
+    const offset = (x + distance * 2) % canvas.width;
+    ctx.beginPath();
+    ctx.moveTo(offset, groundY);
+    ctx.lineTo(offset - 3, groundY - 8);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(offset + 5, groundY);
+    ctx.lineTo(offset + 8, groundY - 6);
+    ctx.stroke();
+  }
+
+  // Checkerboard pattern below ground
+  const tileSize = 20;
+  for (let row = 0; row < 5; row++) {
+    for (let col = -1; col < canvas.width / tileSize + 2; col++) {
+      const checker = (col + Math.floor(distance / tileSize)) % 2 === 0;
+      ctx.fillStyle = checker ? '#E65100' : '#BF360C';
+      ctx.fillRect(col * tileSize - (distance % tileSize), groundY + row * tileSize + 4, tileSize, tileSize);
+    }
+  }
+}
+
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+// Collision
+function aabb(ax, ay, aw, ah, bx, by, bw, bh) {
+  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+// Game loop
+let lastSpawn = 0, lastEnemySpawn = 0;
+
+function update(dt) {
+  if (state !== 'playing') return;
+
+  distance += speed;
+  score = Math.floor(distance / 10);
+  speed = 6 + distance / 3000; // Gradual speed increase
+  if (speed > 14) speed = 14;
+
+  // Sonic physics
+  const gravity = 0.6 * scaleY;
+  sonic.vy += gravity;
+  sonic.y += sonic.vy;
+
+  // Ground collision
+  if (sonic.y + sonic.h > groundY) {
+    sonic.y = groundY - sonic.h;
+    sonic.vy = 0;
+    sonic.jumping = false;
+    sonic.spinTimer = Math.max(0, sonic.spinTimer - dt);
+  }
+
+  if (sonic.hitTimer > 0) sonic.hitTimer -= dt;
+
+  // Spawn rings
+  if (Date.now() - lastSpawn > 600 / (speed / 6)) {
+    spawnRing();
+    // Sometimes spawn a line of rings
+    if (Math.random() > 0.6) {
+      for (let i = 1; i < 5; i++) {
+        setTimeout(() => {
+          if (state === 'playing') spawnRing();
+        }, i * 100);
+      }
+    }
+    lastSpawn = Date.now();
+  }
+
+  // Spawn enemies
+  if (Date.now() - lastEnemySpawn > 2000 / (speed / 6)) {
+    if (Math.random() > 0.3) spawnEnemy();
+    lastEnemySpawn = Date.now();
+  }
+
+  // Move rings
+  rings_list.forEach(r => {
+    r.x -= speed;
+    r.anim += 0.1;
+  });
+  rings_list = rings_list.filter(r => r.x > -30 && !r.collected);
+
+  // Move enemies
+  enemies.forEach(e => {
+    e.x -= speed;
+    e.frame += 0.1;
+  });
+  enemies = enemies.filter(e => e.x > -60);
+
+  // Ring collection
+  rings_list.forEach(r => {
+    if (!r.collected && aabb(sonic.x, sonic.y, sonic.w, sonic.h, r.x - 12, r.y - 12, 24, 24)) {
+      r.collected = true;
+      rings++;
+      score += 50;
+      spawnParticles(r.x, r.y, '#FFD700', 6);
+    }
+  });
+
+  // Enemy collision
+  enemies.forEach(e => {
+    if (!e.alive) return;
+    const ex = e.x - 20 * scaleX, ey = e.y - 16 * scaleY;
+    const ew = 40 * scaleX, eh = 32 * scaleY;
+    if (aabb(sonic.x, sonic.y, sonic.w, sonic.h, ex, ey, ew, eh)) {
+      if (sonic.spinTimer > 0 || sonic.vy > 2) {
+        // Spin dash or jump kill
+        e.alive = false;
+        score += 200;
+        spawnParticles(e.x, e.y, '#FF5722', 10);
+        sonic.vy = -8 * scaleY;
+      } else if (sonic.hitTimer <= 0) {
+        // Hit by enemy
+        if (rings > 0) {
+          rings = Math.max(0, rings - 20);
+          sonic.hitTimer = 1.5;
+          spawnParticles(sonic.x + sonic.w/2, sonic.y, '#FFD700', 15);
+          sonic.vy = -6 * scaleY;
+        } else {
+          // Dead
+          state = 'dead';
+          document.getElementById('gameOver').style.display = 'flex';
+          document.getElementById('finalScore').textContent = 'Score: ' + score;
+          document.getElementById('finalRings').textContent = 'Rings: ' + rings;
+        }
+      }
+    }
+  });
+
+  // Update particles
+  particles.forEach(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.2;
+    p.life -= 0.03;
+  });
+  particles = particles.filter(p => p.life > 0);
+
+  // UI
+  document.getElementById('score').textContent = 'SCORE: ' + score;
+  document.getElementById('rings').textContent = '💍 ' + rings;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawBackground();
+  rings_list.forEach(r => drawRing(r.x, r.y, r.collected, r.anim));
+  enemies.filter(e => e.alive).forEach(e => drawEnemy(e));
+  drawSonic();
+  drawParticles();
+
+  // Speed lines when going fast
+  if (speed > 8) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 5; i++) {
+      const ly = Math.random() * canvas.height;
+      const lx = Math.random() * canvas.width;
+      ctx.beginPath();
+      ctx.moveTo(lx, ly);
+      ctx.lineTo(lx - speed * 8, ly);
+      ctx.stroke();
+    }
+  }
+}
+
+function loop() {
+  update(1/60);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// Controls
+function jump() {
+  if (state === 'start') {
+    state = 'playing';
+    reset();
+    document.getElementById('startScreen').style.display = 'none';
+    document.getElementById('gameOver').style.display = 'none';
+    return;
+  }
+  if (state === 'dead') {
+    state = 'playing';
+    reset();
+    document.getElementById('gameOver').style.display = 'none';
+    return;
+  }
+  if (state === 'playing' && !sonic.jumping) {
+    sonic.vy = -13 * scaleY;
+    sonic.jumping = true;
+    sonic.ducking = false;
+  }
+}
+
+function spinDash() {
+  if (state === 'playing' && !sonic.jumping) {
+    sonic.spinTimer = 2;
+  }
+}
+
+// Catch-all tap handler for overlays + canvas
+function handleTap() {
+  if (state !== 'playing') { jump(); return; }
+  jump();
+}
+
+// Touch controls on canvas
+let touchStartY = 0;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  touchStartY = e.touches[0].clientY;
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  const touchEndY = e.changedTouches[0].clientY;
+  const dy = touchStartY - touchEndY;
+  if (state !== 'playing') { jump(); return; }
+  if (dy > 30) {
+    jump();
+  } else if (dy < -30) {
+    spinDash();
+  } else {
+    jump();
+  }
+}, { passive: false });
+
+canvas.addEventListener('click', handleTap);
+
+// Also bind to overlay screens so taps pass through
+const startScreen = document.getElementById('startScreen');
+const gameOverScreen = document.getElementById('gameOver');
+
+startScreen.addEventListener('click', handleTap);
+startScreen.addEventListener('touchend', e => { e.preventDefault(); handleTap(); }, { passive: false });
+gameOverScreen.addEventListener('click', handleTap);
+gameOverScreen.addEventListener('touchend', e => { e.preventDefault(); handleTap(); }, { passive: false });
+
+// Keyboard (for desktop testing)
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') jump();
+  if (e.code === 'ArrowDown') spinDash();
+});
+
+// Mouse
+canvas.addEventListener('mousedown', e => {
+  if (state !== 'playing') { jump(); return; }
+  const y = e.clientY / window.innerHeight;
+  if (y > 0.5) { spinDash(); } else { jump(); }
+});
+
+// Start
+reset();
+loop();
+</script>
+</body>
+</html>
